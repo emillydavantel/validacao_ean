@@ -67,6 +67,111 @@ def round_up_to_multiple(value: float, multiple: int) -> float:
         return round(value)
     return math.ceil(value / multiple) * multiple
 
+
+# =========================================================================
+# REGRA UNICA DE SUGESTAO DE COMPRA POR PRODUTO
+# Doc: Flowb2b_v2/docs/regra-sugestao-compra.md
+# Substitui as copias divergentes (esta e a fonte de verdade da PRODUCAO).
+# =========================================================================
+
+def teto_caixa(valor: float, item_por_caixa: int) -> int:
+    """Arredonda SEMPRE para cima ao proximo multiplo da caixa (ceil)."""
+    cx = item_por_caixa if item_por_caixa and item_por_caixa > 0 else 1
+    return int(math.ceil(valor / cx) * cx)
+
+
+def calcular_sugestao_produto(item_por_caixa, data_ultima_compra, data_hoje,
+                              estoque_atual, qtd_vendida_periodo,
+                              prazo_entrega, prazo_estoque,
+                              confiabilidade_min_dias=7, dias_periodo_opcional=None,
+                              teto_venda_dia=None, fator_seguranca=1.25, pedido_minimo=2):
+    """
+    ETAPA 2 (quantidade). Funcao PURA (sem IO).
+    - qtd_vendida_periodo = venda REAL do periodo (NUNCA compras - estoque).
+    - cobertura = prazo_entrega + prazo_estoque.
+    - fator de seguranca so quando estoque = 0; pedido minimo quando zerado com demanda.
+    """
+    dias_venda = (data_hoje - data_ultima_compra).days
+    dias_periodo = dias_periodo_opcional if dias_periodo_opcional else dias_venda
+
+    media_venda_dia = 0 if dias_periodo == 0 else qtd_vendida_periodo / dias_periodo
+    if teto_venda_dia:
+        media_venda_dia = min(media_venda_dia, teto_venda_dia)
+
+    confiabilidade = "Janela curta - revisar" if dias_periodo < confiabilidade_min_dias else "OK"
+    periodo_cobertura = (prazo_entrega or 0) + (prazo_estoque or 0)
+
+    sugestao_qtd = media_venda_dia * periodo_cobertura - estoque_atual
+    if estoque_atual < 1:
+        sugestao_qtd = sugestao_qtd * fator_seguranca
+    if sugestao_qtd < 0:
+        sugestao_qtd = 0
+
+    teto_sugestao = teto_caixa(sugestao_qtd, item_por_caixa)
+    teto_minimo = teto_caixa(pedido_minimo, item_por_caixa) if (estoque_atual < 1 and sugestao_qtd > 0) else 0
+    sugestao_final = max(teto_sugestao, teto_minimo)
+
+    dias_estoque_atual = 0 if media_venda_dia == 0 else estoque_atual / media_venda_dia
+
+    return {
+        "sugestao_quantidade": sugestao_final,
+        "media_venda_dia": media_venda_dia,
+        "periodo_venda": dias_periodo,
+        "quantidade_vendida": qtd_vendida_periodo,
+        "confiabilidade": confiabilidade,
+        "periodo_cobertura": periodo_cobertura,
+        "dias_estoque_atual": dias_estoque_atual,
+        "multiplicacao_aplicada": teto_minimo > teto_sugestao,
+    }
+
+
+def fetch_fornecedor_mais_barato(produto_ids, empresa_id) -> Dict:
+    """
+    ETAPA 1: para cada produto, retorna o fornecedor_id de MENOR preco efetivo
+    = valor_de_compra * (1 - desconto/100). Empate -> menor prazo_entrega.
+    Serve para comprar de UM so fornecedor (o mais barato) e nunca duplicar o
+    pedido quando o produto tem varios fornecedores. Retorna {produto_id: fornecedor_id}.
+    """
+    if not produto_ids:
+        return {}
+    try:
+        ids = ",".join(str(p) for p in produto_ids)
+        url_fp = f"{API_URL_BASE}/rest/v1/fornecedores_produtos?produto_id=in.({ids})&select=produto_id,fornecedor_id,valor_de_compra,precocusto"
+        resp = requests.get(url_fp, headers=HEADERS)
+        if resp.status_code != 200:
+            logger.warning(f"fetch_fornecedor_mais_barato: erro ao buscar precos: {resp.text}")
+            return {}
+        rows = resp.json()
+
+        url_pol = f"{API_URL_BASE}/rest/v1/politica_compra?empresa_id=eq.{empresa_id}&select=fornecedor_id,desconto,prazo_entrega"
+        resp_pol = requests.get(url_pol, headers=HEADERS)
+        politicas_por_forn = {}
+        if resp_pol.status_code == 200:
+            for p in resp_pol.json():
+                politicas_por_forn[p.get("fornecedor_id")] = p
+
+        melhor = {}  # produto_id -> (preco_efetivo, prazo_entrega, fornecedor_id)
+        for r in rows:
+            pid = r.get("produto_id")
+            fid = r.get("fornecedor_id")
+            base = r.get("valor_de_compra")
+            if base is None:
+                base = r.get("precocusto")
+            if base is None:
+                continue
+            pol = politicas_por_forn.get(fid, {})
+            desconto = float(pol.get("desconto") or 0)
+            prazo = pol.get("prazo_entrega")
+            prazo = prazo if prazo is not None else 9999
+            preco_efetivo = float(base) * (1 - desconto / 100)
+            atual = melhor.get(pid)
+            if atual is None or (preco_efetivo, prazo) < (atual[0], atual[1]):
+                melhor[pid] = (preco_efetivo, prazo, fid)
+        return {pid: v[2] for pid, v in melhor.items()}
+    except Exception as e:
+        logger.warning(f"fetch_fornecedor_mais_barato falhou: {e}")
+        return {}
+
 @router.post("/calcular")
 async def calcular_pedido(fornecedor: FornecedorID):
     """Endpoint original mantido para compatibilidade"""
@@ -94,7 +199,7 @@ async def calcular_pedido(fornecedor: FornecedorID):
         penultimo_map = fetch_penultimo_pedido(produto_ids, empresa_id)
 
         # Passo 3: Processar o cálculo
-        resultado = process_calculation(politicas, produtos, produtos_datas, penultimo_map)
+        resultado = process_calculation(politicas, produtos, produtos_datas, penultimo_map, empresa_id, fornecedor_id)
 
         logger.info("Cálculo concluído com sucesso.")
         return resultado
@@ -910,11 +1015,16 @@ def fetch_id_produto_bling(produto_id: int) -> int:
     result = response.json()
     return result[0]['id_produto_bling'] if result else None
 
-def process_calculation(politicas: List[Dict], produtos: List[Dict], produtos_datas: Dict, penultimo_map: Dict = None) -> list:
+def process_calculation(politicas: List[Dict], produtos: List[Dict], produtos_datas: Dict, penultimo_map: Dict = None, empresa_id: int = None, fornecedor_id: int = None) -> list:
     resultado = []
     penultimo_map = penultimo_map or {}
 
     id_produto_bling_cache = {}
+
+    # ETAPA 1 da regra: fornecedor de MENOR preco por produto. Um produto so
+    # entra no pedido deste fornecedor se este for o mais barato dele.
+    produto_ids_calc = [p['produto_id'] for p in produtos]
+    fornecedor_mais_barato = fetch_fornecedor_mais_barato(produto_ids_calc, empresa_id)
 
     for politica in politicas:
         produtos_array = []
@@ -925,46 +1035,43 @@ def process_calculation(politicas: List[Dict], produtos: List[Dict], produtos_da
         for produto in produtos:
             produto_id = produto['produto_id']
 
+            # ETAPA 1: comprar do fornecedor mais barato. Se outro fornecedor
+            # for mais barato para este produto, ele nao entra no pedido deste.
+            forn_barato = fornecedor_mais_barato.get(produto_id)
+            if forn_barato is not None and fornecedor_id is not None and forn_barato != fornecedor_id:
+                continue
+
             data_info = produtos_datas.get(produto_id, {})
             data_ultima_venda_str = data_info.get('data_ultima_venda')
             data_ultima_compra_str = data_info.get('data_ultima_compra')
-
             estoque_atual = produto.get('estoque_atual') or 0
 
-            if estoque_atual > 0:
-                data_ultima_venda_str = datetime.now().date().isoformat()
-            elif not data_ultima_venda_str:
-                continue
-
-            data_ultima_venda = ajustar_data_futura(parser.isoparse(data_ultima_venda_str).date())
-            data_ultima_compra = ajustar_data_compra(data_ultima_compra_str, data_ultima_venda, politica)
-
-            periodo_venda = max((data_ultima_venda - data_ultima_compra).days, 1)
+            # ETAPA 2: quantidade pela regra unica (venda REAL do periodo ate hoje).
+            data_hoje = datetime.now().date()
+            if data_ultima_compra_str:
+                data_ultima_compra = parser.isoparse(data_ultima_compra_str).date()
+            else:
+                # Sem ultima compra registrada: usa janela padrao de 90 dias ate hoje.
+                data_ultima_compra = data_hoje - timedelta(days=90)
 
             quantidade_vendida = fetch_quantidade_vendida(
                 produto_id,
                 data_ultima_compra.isoformat(),
-                data_ultima_venda.isoformat()
+                data_hoje.isoformat()
             )
 
-            media_venda_dia = quantidade_vendida / periodo_venda
-
-            # DETECÇÃO DE ANOMALIA: usar penúltimo pedido para validar média
-            penultimo_data = penultimo_map.get(produto_id)
-            if penultimo_data:
-                intervalo = penultimo_data.get('intervalo')
-                qtd_penultima = penultimo_data.get('qtd_penultima')
-
-                # Validar intervalo (entre 7 e 180 dias)
-                if intervalo and qtd_penultima and 7 <= intervalo <= 180:
-                    media_esperada = qtd_penultima / intervalo
-
-                    # Se média atual > 2.5x média esperada, corrigir
-                    if media_venda_dia > media_esperada * 2.5:
-                        logger.info(f"Produto {produto_id}: Anomalia detectada - média {media_venda_dia:.2f}/dia corrigida para {media_esperada:.2f}/dia")
-                        media_venda_dia = media_esperada
-
-            sugestao_quantidade, multiplicacao = calcular_sugestao(produto, politica, media_venda_dia, quantidade_vendida)
+            calc = calcular_sugestao_produto(
+                item_por_caixa=produto.get('itens_por_caixa') or 1,
+                data_ultima_compra=data_ultima_compra,
+                data_hoje=data_hoje,
+                estoque_atual=estoque_atual,
+                qtd_vendida_periodo=quantidade_vendida,
+                prazo_entrega=politica.get('prazo_entrega'),
+                prazo_estoque=politica.get('prazo_estoque'),
+            )
+            sugestao_quantidade = calc['sugestao_quantidade']
+            periodo_venda = calc['periodo_venda']
+            multiplicacao = calc['multiplicacao_aplicada']
 
             if sugestao_quantidade <= 0:
                 continue
