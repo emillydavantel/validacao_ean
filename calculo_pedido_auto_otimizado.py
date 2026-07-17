@@ -26,6 +26,10 @@ HEADERS = {
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Anti-pico: se a janela de medicao (desde a ultima compra) for menor que isto,
+# recua para a PENULTIMA compra (NF), diluindo picos de periodo curto.
+GATILHO_PENULTIMA_DIAS = 7
+
 class FornecedorID(BaseModel):
     fornecedor_id: int
     empresa_id: int
@@ -971,7 +975,8 @@ def fetch_max_data_saida(produto_ids: list) -> Dict:
     return {item['produto_id']: item['max_data_saida'] for item in vendas_data}
 
 def fetch_max_data_compra(produto_ids: list) -> Dict:
-    url = f"{API_URL_BASE}/rest/v1/rpc/get_max_data_compra"
+    # data de ENTRADA real da NF (data_operacao), nao dh_sai_ent — evita defasagem de 1 dia
+    url = f"{API_URL_BASE}/rest/v1/rpc/get_max_data_entrada_op"
     payload = {"produto_ids": produto_ids}
     response = requests.post(url, headers=HEADERS, json=payload)
 
@@ -983,8 +988,8 @@ def fetch_max_data_compra(produto_ids: list) -> Dict:
     return {item['produto_id']: item['max_data_compra'] for item in compras_data}
 
 def fetch_penultimo_pedido(produto_ids: list, empresa_id: int) -> Dict:
-    """Busca dados do penúltimo pedido de compra para detecção de anomalias"""
-    url = f"{API_URL_BASE}/rest/v1/rpc/get_penultimo_pedido_compra"
+    """Busca a penúltima NF de entrada (não pedido) para recuar a janela em período curto"""
+    url = f"{API_URL_BASE}/rest/v1/rpc/get_penultimo_nf_entrada"
     payload = {"p_produto_ids": produto_ids, "p_empresa_id": empresa_id}
     response = requests.post(url, headers=HEADERS, json=payload)
 
@@ -1046,24 +1051,51 @@ def process_calculation(politicas: List[Dict], produtos: List[Dict], produtos_da
             data_ultima_compra_str = data_info.get('data_ultima_compra')
             estoque_atual = produto.get('estoque_atual') or 0
 
-            # ETAPA 2: quantidade pela regra unica (venda REAL do periodo ate hoje).
+            # ETAPA 2: janela de medicao da venda REAL do sistema.
             data_hoje = datetime.now().date()
+
+            # Inicio da janela = ultima compra (NF de entrada). Sem registro: 90 dias atras.
             if data_ultima_compra_str:
                 data_ultima_compra = parser.isoparse(data_ultima_compra_str).date()
             else:
-                # Sem ultima compra registrada: usa janela padrao de 90 dias ate hoje.
                 data_ultima_compra = data_hoje - timedelta(days=90)
+
+            # Fim da janela (referencia): com estoque -> hoje; em RUPTURA (estoque 0) ->
+            # ultima venda (os dias sem estoque nao contam, nao dava pra vender sem produto).
+            if estoque_atual > 0:
+                data_ref = data_hoje
+            elif data_ultima_venda_str:
+                data_ref = parser.isoparse(data_ultima_venda_str).date()
+                if data_ref > data_hoje:
+                    data_ref = data_hoje
+            else:
+                data_ref = data_hoje
+
+            # Anti-pico: se a janela desde a ultima compra for muito curta (< gatilho),
+            # recua o inicio para a PENULTIMA NF de entrada, diluindo o pico de periodo curto.
+            data_inicio = data_ultima_compra
+            dias_janela = (data_ref - data_ultima_compra).days
+            penu = penultimo_map.get(produto_id) or {}
+            data_penultima_str = penu.get('data_penultima')
+            if dias_janela < GATILHO_PENULTIMA_DIAS and data_penultima_str:
+                data_penultima = parser.isoparse(str(data_penultima_str)).date()
+                if data_penultima < data_inicio:
+                    data_inicio = data_penultima
+
+            # Garante pelo menos 1 dia de janela.
+            if (data_ref - data_inicio).days < 1:
+                data_ref = data_inicio + timedelta(days=1)
 
             quantidade_vendida = fetch_quantidade_vendida(
                 produto_id,
-                data_ultima_compra.isoformat(),
-                data_hoje.isoformat()
+                data_inicio.isoformat(),
+                data_ref.isoformat()
             )
 
             calc = calcular_sugestao_produto(
                 item_por_caixa=produto.get('itens_por_caixa') or 1,
-                data_ultima_compra=data_ultima_compra,
-                data_hoje=data_hoje,
+                data_ultima_compra=data_inicio,
+                data_hoje=data_ref,
                 estoque_atual=estoque_atual,
                 qtd_vendida_periodo=quantidade_vendida,
                 prazo_entrega=politica.get('prazo_entrega'),
