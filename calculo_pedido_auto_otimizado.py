@@ -328,9 +328,9 @@ def fetch_max_data_compra_with_monitoring(produto_ids: list, rules: CalculationR
         raise
 
 def fetch_penultimo_pedido_with_monitoring(produto_ids: list, empresa_id: int, rules: CalculationRules) -> Dict:
-    """Busca dados do penúltimo pedido de compra para detecção de anomalias"""
+    """Busca dados da penúltima NF de entrada para detecção de anomalias (antes usava pedido de compra; NF garante recebimento)"""
     try:
-        url = f"{API_URL_BASE}/rest/v1/rpc/get_penultimo_pedido_compra"
+        url = f"{API_URL_BASE}/rest/v1/rpc/get_penultimo_nf_entrada"
         payload = {"p_produto_ids": produto_ids, "p_empresa_id": empresa_id}
         response = requests.post(url, headers=HEADERS, json=payload)
 
@@ -878,13 +878,13 @@ def fetch_max_data_compra(produto_ids: list) -> Dict:
     return {item['produto_id']: item['max_data_compra'] for item in compras_data}
 
 def fetch_penultimo_pedido(produto_ids: list, empresa_id: int) -> Dict:
-    """Busca dados do penúltimo pedido de compra para detecção de anomalias"""
-    url = f"{API_URL_BASE}/rest/v1/rpc/get_penultimo_pedido_compra"
+    """Busca dados da penúltima NF de entrada para detecção de anomalias (antes usava pedido de compra; NF garante recebimento)"""
+    url = f"{API_URL_BASE}/rest/v1/rpc/get_penultimo_nf_entrada"
     payload = {"p_produto_ids": produto_ids, "p_empresa_id": empresa_id}
     response = requests.post(url, headers=HEADERS, json=payload)
 
     if response.status_code != 200:
-        logger.warning(f"Erro ao buscar penúltimo pedido: {response.text}")
+        logger.warning(f"Erro ao buscar penúltima NF de entrada: {response.text}")
         return {}
 
     penultimo_data = response.json()
