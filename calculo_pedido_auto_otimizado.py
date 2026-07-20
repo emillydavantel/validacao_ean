@@ -30,6 +30,20 @@ logger = logging.getLogger(__name__)
 # recua para a PENULTIMA compra (NF), diluindo picos de periodo curto.
 GATILHO_PENULTIMA_DIAS = 7
 
+# Janela MINIMA de medicao da media diaria (dias).
+#
+# Motivo (caso real, 20/jul/2026 — GOLDEN GATO AD CAST PEIXE 3KG, Henriqueta):
+# a janela vai da ultima NF de entrada ate a referencia. Quando o fornecedor
+# entrega com frequencia, ela COLAPSA: NFs em 06/07 e 08/07, ultima venda 08/07
+# => janela de 2 dias. As 2 vendas do periodo viraram media de 1,0/dia num
+# produto que vende ~3 por MES (0,1/dia) — media 10x inflada. Multiplicada pela
+# cobertura de 35 dias, sugeriu 44 unidades (o correto era ~5).
+#
+# O anti-pico da penultima NF nao resolvia: a penultima tambem era de 2 dias
+# antes. Media diaria so tem significado com periodo suficiente, entao a janela
+# nunca pode ser menor que isto, por mais recente que seja a ultima entrada.
+JANELA_MINIMA_DIAS = 30
+
 class FornecedorID(BaseModel):
     fornecedor_id: int
     empresa_id: int
@@ -1082,9 +1096,13 @@ def process_calculation(politicas: List[Dict], produtos: List[Dict], produtos_da
                 if data_penultima < data_inicio:
                     data_inicio = data_penultima
 
-            # Garante pelo menos 1 dia de janela.
-            if (data_ref - data_inicio).days < 1:
-                data_ref = data_inicio + timedelta(days=1)
+            # Janela MINIMA: recua o inicio ate completar JANELA_MINIMA_DIAS.
+            # Vem DEPOIS do anti-pico da penultima NF (que pode nao ser suficiente
+            # quando as entregas sao frequentes). Recuar o INICIO, e nao empurrar o
+            # fim, preserva a regra de ruptura: o fim continua sendo a ultima venda,
+            # entao dias sem estoque seguem fora da conta.
+            if (data_ref - data_inicio).days < JANELA_MINIMA_DIAS:
+                data_inicio = data_ref - timedelta(days=JANELA_MINIMA_DIAS)
 
             quantidade_vendida = fetch_quantidade_vendida(
                 produto_id,
