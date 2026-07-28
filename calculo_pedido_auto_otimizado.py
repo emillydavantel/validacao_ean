@@ -528,28 +528,35 @@ def process_calculation_with_monitoring(politicas: List[Dict], produtos: List[Di
             "valor_com_desconto": valor_total_pedido_com_desconto
         })
 
-        # Verificar valor mínimo
+        # Valor mínimo: NÃO exclui mais a política. Ela é sempre retornada, com um flag
+        # informando se o pedido atingiu o mínimo (o front mostra "abaixo do mínimo" em
+        # vez de a política sumir). Isso evita "não aparecem todas as políticas".
         valor_minimo = politica.get('valor_minimo') or 0
-        if valor_total_pedido >= valor_minimo:
-            politica_compra = montar_politica_compra(
-                politica,
-                valor_total_pedido,
-                valor_total_pedido_com_desconto,
-                quantidade_produtos,
-                False,  # melhor_politica será definido depois
-                produtos_array
-            )
-            resultado.append(politica_compra)
+        atingiu_minimo = valor_total_pedido >= valor_minimo
+        politica_compra = montar_politica_compra(
+            politica,
+            valor_total_pedido,
+            valor_total_pedido_com_desconto,
+            quantidade_produtos,
+            False,  # melhor_politica será definido depois
+            produtos_array,
+            atingiu_minimo
+        )
+        resultado.append(politica_compra)
+        if atingiu_minimo:
             rules.add_rule("POLICY_INCLUDED", f"Política {politica_id} incluída no resultado")
         else:
-            rules.add_rule("POLICY_EXCLUDED", f"Política {politica_id} excluída - valor mínimo não atingido", data={
+            rules.add_rule("POLICY_BELOW_MIN", f"Política {politica_id} abaixo do valor mínimo (retornada com aviso)", data={
                 "valor_total": valor_total_pedido,
-                "valor_minimo": valor_minimo
+                "valor_minimo": valor_minimo,
+                "falta": valor_minimo - valor_total_pedido
             })
 
-    # Determinar melhor política entre as que atingiram valor mínimo
-    if resultado:
-        melhor_politica_id = find_best_policy_among_results(resultado, rules)
+    # Melhor política: escolher SÓ entre as que atingiram o valor mínimo (não pré-seleciona
+    # uma política abaixo do mínimo). Se nenhuma atingiu, não marca melhor.
+    qualificadas = [p for p in resultado if p.get('atingiu_valor_minimo')]
+    if qualificadas:
+        melhor_politica_id = find_best_policy_among_results(qualificadas, rules)
         for politica_compra in resultado:
             if politica_compra['politica_id'] == melhor_politica_id:
                 politica_compra['melhor_politica'] = True
@@ -1275,9 +1282,10 @@ def montar_detalhes_produto(produto: Dict, quantidade_vendida: float, periodo_ve
         'id_produto_bling': id_produto_bling
     }
 
-def montar_politica_compra(politica: Dict, valor_total_pedido: float, 
-                          valor_total_pedido_com_desconto: float, quantidade_produtos: int, 
-                          melhor_politica: bool, produtos_array: list) -> Dict:
+def montar_politica_compra(politica: Dict, valor_total_pedido: float,
+                          valor_total_pedido_com_desconto: float, quantidade_produtos: int,
+                          melhor_politica: bool, produtos_array: list,
+                          atingiu_valor_minimo: bool = True) -> Dict:
     return {
         'politica_id': politica.get('id'),
         'desconto': politica.get('desconto'),
@@ -1285,6 +1293,9 @@ def montar_politica_compra(politica: Dict, valor_total_pedido: float,
         'valor_minimo': politica.get('valor_minimo'),
         'prazo_estoque': politica.get('prazo_estoque'),
         'melhor_politica': melhor_politica,
+        # A política é sempre retornada; este flag diz se o pedido atingiu o valor minimo
+        # dela (para o front exibir "abaixo do minimo" em vez de sumir com a politica).
+        'atingiu_valor_minimo': atingiu_valor_minimo,
         'quantidade_produtos': quantidade_produtos,
         'valor_total_pedido_sem_desconto': valor_total_pedido,
         'valor_total_pedido_com_desconto': valor_total_pedido_com_desconto,
