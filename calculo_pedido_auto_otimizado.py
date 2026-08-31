@@ -154,7 +154,7 @@ def fetch_fornecedor_mais_barato(produto_ids, empresa_id) -> Dict:
         return {}
     try:
         ids = ",".join(str(p) for p in produto_ids)
-        url_fp = f"{API_URL_BASE}/rest/v1/fornecedores_produtos?produto_id=in.({ids})&select=produto_id,fornecedor_id,valor_de_compra,precocusto"
+        url_fp = f"{API_URL_BASE}/rest/v1/fornecedores_produtos?produto_id=in.({ids})&empresa_id=eq.{empresa_id}&select=produto_id,fornecedor_id,valor_de_compra,precocusto"
         resp = requests.get(url_fp, headers=HEADERS)
         if resp.status_code != 200:
             logger.warning(f"fetch_fornecedor_mais_barato: erro ao buscar precos: {resp.text}")
@@ -1107,7 +1107,9 @@ def process_calculation(politicas: List[Dict], produtos: List[Dict], produtos_da
             quantidade_vendida = fetch_quantidade_vendida(
                 produto_id,
                 data_inicio.isoformat(),
-                data_ref.isoformat()
+                data_ref.isoformat(),
+                empresa_id=empresa_id,
+                codigo=produto.get('codigo_produto')
             )
 
             calc = calcular_sugestao_produto(
@@ -1187,13 +1189,20 @@ def ajustar_data_compra(data_ultima_compra_str: str, data_ultima_venda: datetime
 
     return data_ultima_compra
 
-def fetch_quantidade_vendida(produto_id: int, data_inicio: str, data_fim: str) -> float:
+def fetch_quantidade_vendida(produto_id: int, data_inicio: str, data_fim: str,
+                             empresa_id: int = None, codigo: str = None) -> float:
     url = f"{API_URL_BASE}/rest/v1/rpc/get_quantidade_vendida"
     payload = {
         "p_produto_id": produto_id,
         "data_inicio": data_inicio,
         "data_fim": data_fim
     }
+    # Tenant-safe: com empresa_id + codigo, a RPC soma por empresa_id + (codigo OU
+    # produto_id) — evita venda vazando/sumindo entre lojas (produto_id mal-vinculado).
+    if empresa_id is not None:
+        payload["p_empresa_id"] = empresa_id
+    if codigo:
+        payload["p_codigo"] = codigo
     response = requests.post(url, headers=HEADERS, json=payload)
 
     if response.status_code != 200:
