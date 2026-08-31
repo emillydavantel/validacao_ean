@@ -11,3 +11,7 @@ __pycache__/
 # Arquivos de configuração do IDE/editor
 .vscode/
 .idea/
+
+# Segredo nunca no codigo
+.env
+*.env

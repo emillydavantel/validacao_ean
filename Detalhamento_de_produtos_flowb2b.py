@@ -1,3 +1,4 @@
+import os
 from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel, HttpUrl
 import requests
@@ -13,7 +14,7 @@ class EmpresaDetalhamento(BaseModel):
     data_fim: Optional[date] = None
 
 API_URL_BASE = "https://asahknimbggpzpoebmej.supabase.co"
-API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFzYWhrbmltYmdncHpwb2VibWVqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MTcxODQxNjMsImV4cCI6MjAzMjc2MDE2M30.rYChkMDDU-hdsMK_MxT6tQLCTNj_D6U__jQKIaXCP2U"
+os.environ["SUPABASE_ANON_KEY"]  # nunca hardcode: chave sai por variavel de ambiente
 
 def processar_detalhamento(empresa_id: int, webhook_url: str, data_inicio: Optional[date], data_fim: Optional[date]):
     headers = {
